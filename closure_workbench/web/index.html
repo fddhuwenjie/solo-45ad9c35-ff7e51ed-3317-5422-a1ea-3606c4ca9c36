@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>盾构测量闭合工作台</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>盾构推进测量闭合工作台</h1>
+  <div id="statusBanner" class="banner">加载中…</div>
+  <div class="toolbar">
+    <label>过程边权
+      <input type="range" id="pw" min="0.1" max="100" step="0.1" value="10">
+      <span id="pwVal">10.0</span>
+    </label>
+    <button id="btnRun">冻结本次计算（可重放快照）</button>
+    <button id="btnReseed" class="warn">重置为演示数据</button>
+    <span id="inputHash" class="hash"></span>
+    <span id="genTime" class="hash"></span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="conflicts" class="active">阻断冲突</button>
+  <button data-tab="topo">换站拓扑</button>
+  <button data-tab="versions">坐标版本</button>
+  <button data-tab="adjust">全线残差</button>
+  <button data-tab="obs">观测数据</button>
+  <button data-tab="import">导入</button>
+  <button data-tab="runs">确认与快照</button>
+</nav>
+
+<main>
+  <!-- ================= conflicts ================= -->
+  <section id="tab-conflicts" class="tab active">
+    <h2>闭合阻断检查</h2>
+    <p class="hint">存在任一阻断项时停止闭合；红色为算法判定的<b>最小冲突边</b>（删除/隔离它可消除最多矛盾环且误伤最小）。点击观测编号可跳转定位。</p>
+    <div id="conflictList"></div>
+    <h3>换站接续路径</h3>
+    <div id="pathBox"></div>
+  </section>
+
+  <!-- ================= topology ================= -->
+  <section id="tab-topo" class="tab">
+    <h2>换站连接拓扑（测站—控制点二分图）</h2>
+    <p class="hint">实线为复测矢量边；粗线为里程顺序+环号约束选出的唯一接续；红色边为冲突边；虚线灰边为时间倒置、不能作为接续证据。</p>
+    <svg id="topoSvg" width="1180" height="420"></svg>
+    <h3>接续链接明细</h3>
+    <table id="linkTable"></table>
+  </section>
+
+  <!-- ================= versions ================= -->
+  <section id="tab-versions" class="tab">
+    <h2>坐标系版本与变换链</h2>
+    <table id="versionTable"></table>
+  </section>
+
+  <!-- ================= adjustment ================= -->
+  <section id="tab-adjust" class="tab">
+    <h2>全线加权平差与残差传播</h2>
+    <p class="hint">拖动顶部过程边权或到「观测数据」调整任一边权，残差即时沿环链重算（导向/管片观测 + 设计轴过程边的加权最小二乘）。</p>
+    <div id="adjSummary"></div>
+    <svg id="resSvg" width="1180" height="320"></svg>
+    <table id="resTable"></table>
+  </section>
+
+  <!-- ================= observations ================= -->
+  <section id="tab-obs" class="tab">
+    <h2>观测数据（<span id="obsCount"></span>）</h2>
+    <p class="hint">权可即时修改并自动保存；勾选「忽略」隔离粗差边。内容哈希相同的重复导入不会产生新观测。</p>
+    <div class="filters">
+      <input id="obsFilter" placeholder="过滤：环号 / 测站 / 控制点 / 版本 / #观测号">
+      <label><input type="checkbox" id="onlyConflict"> 仅看冲突边</label>
+    </div>
+    <table id="obsTable"></table>
+  </section>
+
+  <!-- ================= import ================= -->
+  <section id="tab-import" class="tab">
+    <h2>导入观测（幂等）</h2>
+    <p class="hint">支持单条 JSON 或 JSON 数组。同内容（不含权）重复导入不新增观测；仅权变化时重新绑定原观测。</p>
+    <textarea id="importText" rows="14" placeholder='[
+  {"kind":"guide","version_id":"G2","ring_no":61,"x":91.42,"y":0.002,"measured_at":"2026-08-21T18:30","weight":1.0},
+  {"kind":"resurvey","version_id":"R4","station":"S3","target_cp":"CP5","vx":45.01,"vy":4.02,"ring_no":91,"measured_at":"2026-09-11T10:00"}
+]'></textarea>
+    <div><button id="btnImport">导入</button> <span id="importResult"></span></div>
+    <h3>字段说明</h3>
+    <ul class="hint">
+      <li><b>guide / segment</b>：version_id、ring_no（控制点联测时填 target_cp、ring_no 留空）、x、y、measured_at</li>
+      <li><b>resurvey</b>：version_id、station、target_cp、vx、vy、ring_no、measured_at</li>
+    </ul>
+  </section>
+
+  <!-- ================= runs ================= -->
+  <section id="tab-runs" class="tab">
+    <h2>确认留痕与可重放快照</h2>
+    <h3>版本确认记录（冻结旧坐标+变换参数）</h3>
+    <table id="confirmTable"></table>
+    <h3>计算快照</h3>
+    <p class="hint">相同输入哈希+相同参数不重复落库；展开可查看冻结的旧坐标、全部变换参数与计算摘要，供日后重放核对。</p>
+    <div id="runList"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
