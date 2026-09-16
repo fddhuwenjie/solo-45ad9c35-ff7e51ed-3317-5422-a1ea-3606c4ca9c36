@@ -292,13 +292,20 @@ def station_topology(st: State):
     for cp, olist in cp_stations.items():
         stations_here = sorted({o["station"] for o in olist})
         for a, b in itertools.combinations(stations_here, 2):
-            # a handover edge only counts as evidence if BOTH observations
-            # were taken after the receiving station came into service
-            ev = [o for o in olist
-                  if o["station"] in (a, b)
-                  and (move_into.get(o["station"]) is None
-                       or o["measured_at"] >= move_into[o["station"]])]
-            time_ok = {o["station"] for o in ev} == set(stations_here)
+            # Pairwise evidence isolation: when 3+ stations share one CP,
+            # the (a, b) handover is judged ONLY from this pair's own
+            # observations — observations of other stations on the same CP
+            # can neither validate nor invalidate it.  One timely resurvey per
+            # station is sufficient; a single early edge is flagged separately
+            # (time_inversion) but does not void the pair's other evidence.
+            def _valid(o):
+                mt = move_into.get(o["station"])
+                return mt is None or o["measured_at"] >= mt
+            pair_obs = [o for o in olist if o["station"] in (a, b)]
+            valid_stations = {o["station"] for o in pair_obs if _valid(o)}
+            time_ok = valid_stations == {a, b}
+            ev = [o for o in pair_obs if _valid(o)]
+            early_ev = [o["id"] for o in pair_obs if not _valid(o)]
             # orient by declared move order
             if (a, b) in move_pairs:
                 frm, to = a, b
@@ -322,7 +329,9 @@ def station_topology(st: State):
                 "from_max_ring": max_ring[frm],
                 "to_min_ring": min(to_rings) if to_rings else None,
                 "obs_ids": [o["id"] for o in olist],
+                "pair_obs_ids": [o["id"] for o in pair_obs],
                 "evidence_ids": [o["id"] for o in ev],
+                "early_evidence_ids": early_ev,
             })
     return edges, links, move_pairs, dict(max_ring)
 
@@ -486,17 +495,27 @@ def detect_conflicts(st: State):
         if mt and o["measured_at"] < mt:
             conflicts.append({
                 "type": "time_inversion", "severity": "block",
-                "obs_id": o["id"],
+                "obs_id": o["id"], "cut_edges": [o["id"]],
                 "message": f"{o['station']}→{o['target_cp']} 复测于 "
                            f"{o['measured_at']}，早于该站换站时刻 {mt}",
             })
 
-    # 2) ring-number inversion on a declared handover link
+    # 2) ring-number inversion on a declared handover link.  The minimum
+    #    conflict edge is the receiving-side observation with the smallest
+    #    (inverting) ring number, tie-broken by lowest weight.
     for l in links:
         if l["declared"] and not l["ring_ok"]:
+            inv = [o for o in edges
+                   if o["id"] in l["obs_ids"] and o["station"] == l["to"]
+                   and o["ring_no"]]
+            cut_edge = None
+            if inv:
+                cut_edge = sorted(
+                    inv, key=lambda o: (o["ring_no"], o["weight"]))[0]["id"]
             conflicts.append({
                 "type": "ring_inversion", "severity": "block",
                 "obs_ids": l["obs_ids"],
+                "cut_edges": [cut_edge] if cut_edge else [],
                 "message": f"换站接续 {l['from']}→{l['to']}（{l['cp']}）环号倒灌："
                            f"接管侧最小环 {l['to_min_ring']} < 交出侧最大环 "
                            f"{l['from_max_ring']}",
@@ -513,7 +532,7 @@ def detect_conflicts(st: State):
         if o["kind"] in ("guide", "segment") and not o["ignored"] \
                 and o["ring_no"] is not None:
             by_ring[o["ring_no"]].add(o["version_id"])
-            ring_obs[o["ring_no"]].append(o["id"])
+            ring_obs[o["ring_no"]].append(o)
     cross_groups = defaultdict(list)   # unresolved family set -> rings
     for ring, vids in sorted(by_ring.items()):
         families = {fam[v] for v in vids}
@@ -526,26 +545,37 @@ def detect_conflicts(st: State):
             cross_groups[unresolved].append(ring)
     for unresolved, rings in cross_groups.items():
         handover = rings[0]
+        unresolved_vids = {v for v in by_ring[handover] if fam[v] in unresolved}
+        # minimum conflict edges: observations on the handover ring that
+        # belong to the unresolved (unconfirmed) coordinate family
+        hand_obs = [o for o in ring_obs[handover]
+                    if o["version_id"] in unresolved_vids]
+        cut_edges = [o["id"] for o in hand_obs]
         conflicts.append({
             "type": "version_cross", "severity": "block",
             "ring": handover, "rings": rings,
-            "obs_ids": ring_obs[handover],
+            "obs_ids": [o["id"] for o in ring_obs[handover]],
+            "cut_edges": cut_edges,
             "families": list(unresolved),
             "message": f"坐标版本交叉：族 {'/'.join(unresolved)} 在第 "
                        f"{handover}~{rings[-1]} 环（共 {len(rings)} 环）"
                        f"与已确认版本无变换链；交界环为第 {handover} 环",
         })
 
-    # 4) control-point contradiction cycles
+    # 4) control-point contradiction cycles.  One global minimum feedback
+    #    edge set explains every bad cycle; each reported cycle is tagged
+    #    with the cut edges that resolve it.
     convertible = [o for o in edges if o.get("cvx") is not None]
     bad = contradiction_cycles(st, convertible)
     cut = minimal_cut(st, convertible, bad) if bad else []
+    cut_set = set(cut)
     for c in bad:
+        own = [e for e in c["edges"] if e in cut_set]
         conflicts.append({
             "type": "contradiction_cycle", "severity": "block",
             "obs_ids": c["edges"],
             "misclosure": round(c["misclosure"], 4),
-            "cut_edge": c["edges"][0] if len(bad) == 1 else None,
+            "cut_edges": own,
             "message": "控制点矛盾环（"
                        + "-".join(str(i) for i in c["edges"])
                        + f"）闭合差 {c['misclosure']*1000:.1f} mm 超差 "
@@ -557,13 +587,26 @@ def detect_conflicts(st: State):
     path_msg = ""
     if len(paths) == 1:
         path_msg = "唯一接续路径：" + " → ".join(paths[0]["stations"])
+        hard = [c for c in conflicts
+                if c["type"] in ("time_inversion", "ring_inversion",
+                                 "version_cross")]
+        if hard:
+            why = "；".join(sorted({c["type"] for c in hard}))
+            path_msg += f"（拓扑唯一，但存在阻断项 {why}，需先解除方可闭合）"
     elif len(paths) == 0:
         path_status = "none"
-        path_msg = f"里程/环号约束下 {start} 到 {target} 不存在接续路径"
+        path_msg = f"里程/环号/时间约束下 {start} 到 {target} 不存在可用接续路径"
     else:
         path_status = "ambiguous"
         path_msg = (f"存在 {len(paths)} 条接续候选，约束不足以唯一确定："
                     + "；".join(" → ".join(p["stations"]) for p in paths))
+
+    # ordered de-duplicated union of every conflict's minimum conflict edge
+    cut_union = []
+    for c in conflicts:
+        for e in c.get("cut_edges", []) or []:
+            if e is not None and e not in cut_union:
+                cut_union.append(e)
 
     return {
         "conflicts": conflicts,
@@ -571,7 +614,7 @@ def detect_conflicts(st: State):
         "edges": [_edge_json(o) for o in edges],
         "order": order, "paths": paths,
         "path_status": path_status, "path_message": path_msg,
-        "cut_edges": cut,
+        "cut_edges": cut_union,
     }
 
 
@@ -610,6 +653,10 @@ def line_adjustment(st: State, process_weight=PROCESS_WEIGHT):
 
     for o in st.obs:
         if o["kind"] not in ("guide", "segment") or o["ignored"]:
+            continue
+        # ring-less guide control surveys only serve transform fitting; they
+        # are not ring-chain observations and never enter the adjustment
+        if o["ring_no"] is None:
             continue
         if o.get("cx") is None or o["ring_no"] not in idx:
             obs_rows.append({"id": o["id"], "ring": o["ring_no"],
@@ -696,7 +743,19 @@ def assemble(conn, process_weight=PROCESS_WEIGHT, include_ls=True):
     st = State(conn)
     topo = detect_conflicts(st)
     blocked = bool(topo["conflicts"]) or topo["path_status"] != "unique"
-    ls = line_adjustment(st, process_weight) if include_ls else None
+    # Closure stops on ANY blocker: never produce a "usable" adjustment
+    # (status ok / RMS / residuals) while time inversions, version crosses
+    # or contradiction cycles exist.
+    if include_ls:
+        ls = (line_adjustment(st, process_weight) if not blocked
+              else {"status": "blocked", "rings": [], "obs": [],
+                    "rms": None, "max_residual": None, "max_obs_id": None,
+                    "params": {"process_weight": process_weight,
+                               "misclosure_tol": MISCLOSURE_TOL_M},
+                    "reason": sorted({c["type"] for c in topo["conflicts"]}),
+                    "reason_path": topo["path_status"]})
+    else:
+        ls = None
 
     versions = []
     for v in st.versions.values():

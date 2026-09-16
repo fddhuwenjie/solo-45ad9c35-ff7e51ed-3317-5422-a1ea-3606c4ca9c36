@@ -66,13 +66,14 @@ function obsRef(id) {
 function renderConflicts() {
   const box = $("#conflictList");
   const cs = STATE.topology.conflicts;
-  const cut = new Set(STATE.topology.cut_edges);
   if (!cs.length) {
     box.innerHTML = `<div class="card"><span class="oktext">无阻断冲突。</span></div>`;
   } else {
     box.innerHTML = cs
       .map((c) => {
         const [label, cls] = TYPE_LABEL[c.type] || [c.type, "block"];
+        // minimum conflict edges are attached per conflict
+        const cut = new Set(c.cut_edges || []);
         let edges = "";
         if (c.obs_ids) {
           edges =
@@ -230,6 +231,24 @@ function renderVersions() {
 /* ---------------- adjustment / residuals -------------------------------- */
 function renderAdjust() {
   const a = STATE.adjustment;
+  if (a.status === "blocked") {
+    const reasons = {
+      time_inversion: "复测时间早于换站",
+      version_cross: "坐标版本同环交叉",
+      contradiction_cycle: "控制点矛盾环",
+      ring_inversion: "环号倒灌",
+    };
+    const why = (a.reason || []).map((r) => reasons[r] || r).join("、");
+    $("#adjSummary").innerHTML = `
+      <div class="card block">
+        <div class="ttl badtext">⛔ 闭合已停止，不执行全线平差</div>
+        阻断原因：${why || "换站接续路径不可用"}（${a.reason_path}）。<br>
+        请先在「阻断冲突」页消除全部冲突；消除前不产生、也不展示 RMS 或残差结果。
+      </div>`;
+    $("#resSvg").innerHTML = "";
+    $("#resTable").innerHTML = "";
+    return;
+  }
   if (a.status !== "ok") {
     $("#adjSummary").innerHTML = `<span class="warnt">${a.status}</span>`;
     $("#resSvg").innerHTML = "";
@@ -344,8 +363,8 @@ function renderConfirms() {
       .map(
         (r) => `<details class="run">
         <summary><b>#${r.id}</b> ${r.created_at} · 输入 ${r.input_hash} ·
-          ${r.result.blocked ? '<span class="badtext">阻断态快照</span>' : '<span class="oktext">闭合态快照</span>'}
-          · RMS ${(r.result.adjustment.rms * 1000).toFixed(2)} mm</summary>
+          ${r.result.blocked ? '<span class="badtext">阻断态快照（无平差结果）</span>' : '<span class="oktext">闭合态快照</span>'}
+          ${r.result.blocked ? "" : `· RMS ${(r.result.adjustment.rms * 1000).toFixed(2)} mm`}</summary>
         <h4>计算摘要</h4><pre>${JSON.stringify(
           { params: r.params, result: {
             blocked: r.result.blocked, status: r.result.status_text,

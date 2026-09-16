@@ -242,6 +242,7 @@ class Handler(BaseHTTPRequestHandler):
                                                      engine.PROCESS_WEIGHT)))
                     snap = _freeze_version_snapshot(self.server.conn)
                     params = state["adjustment"]["params"]
+                    adj = state["adjustment"]
                     result = {"blocked": state["blocked"],
                               "status_text": state["status_text"],
                               "path_status": state["topology"]["path_status"],
@@ -249,14 +250,14 @@ class Handler(BaseHTTPRequestHandler):
                               "conflicts": state["topology"]["conflicts"],
                               "cut_edges": state["topology"]["cut_edges"],
                               "adjustment": {
-                                  "rms": state["adjustment"]["rms"],
-                                  "max_residual":
-                                      state["adjustment"]["max_residual"],
-                                  "max_obs_id":
-                                      state["adjustment"]["max_obs_id"],
+                                  "status": adj["status"],
+                                  "rms": adj["rms"],
+                                  "max_residual": adj["max_residual"],
+                                  "max_obs_id": adj["max_obs_id"],
+                                  "reason": adj.get("reason"),
                                   "n_obs": len([
-                                      o for o in state["adjustment"]["obs"]
-                                      if o["status"] == "ok"])}}
+                                      o for o in adj.get("obs", [])
+                                      if o.get("status") == "ok"])}}
                     params_json = json.dumps(params, ensure_ascii=False,
                                              sort_keys=True)
                     existing = self.server.conn.execute(
